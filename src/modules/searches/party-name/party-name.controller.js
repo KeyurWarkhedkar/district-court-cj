@@ -514,4 +514,7 @@ module.exports = {
   businessDetailPost,
   orderPdfPost,
   orderPdfGet,
+  sanitizeCaseDetailResponse,
+  attachOrderPdfProxy,
+  buildCaseDetailSections,
 };

@@ -1,2 +1,7 @@
 /node_modules
 /.env
+.firebaserc
+firebase.json
+firebase-debug.log
+firestore-debug.log
+/src/config/serviceAccountKey.json
