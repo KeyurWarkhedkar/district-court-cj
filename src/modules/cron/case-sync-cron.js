@@ -32,17 +32,16 @@ async function caseSyncCronJob() {
 
     //Iterate through the cases and update one by one
     for(const dcCase of dbCases) {
-        let CASE_NO = dcCase.payload?.detailsPayload?.caseNo;
-        let COURT_CODE = dcCase.payload?.detailsPayload?.courtCode;
-        let COURT_COMPLEX_CODE = dcCase.payload?.detailsPayload?.complexCode;
-        let STATE_CODE = dcCase.payload?.detailsPayload?.stateCode;
-        let CINO = dcCase.payload?.detailsPayload?.cino;
-        let DIST_CODE = dcCase.payload?.detailsPayload?.distCode;
-        let SEARCH_FLAG = dcCase.payload?.detailsPayload?.searchFlag;
-        let SEARCH_BY = dcCase.payload?.detailsPayload?.searchBy;
-
         //Fetch updated data from gov api
         try {
+            let CASE_NO = dcCase.payload?.detailsPayload?.caseNo;
+            let COURT_CODE = dcCase.payload?.detailsPayload?.courtCode;
+            let COURT_COMPLEX_CODE = dcCase.payload?.detailsPayload?.complexCode;
+            let STATE_CODE = dcCase.payload?.detailsPayload?.stateCode;
+            let CINO = dcCase.payload?.detailsPayload?.cino;
+            let DIST_CODE = dcCase.payload?.detailsPayload?.distCode;
+            let SEARCH_FLAG = dcCase.payload?.detailsPayload?.searchFlag;
+            let SEARCH_BY = dcCase.payload?.detailsPayload?.searchBy;
             const params = {
                 caseNo: CASE_NO,
                 cino: CINO,
