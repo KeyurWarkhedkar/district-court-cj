@@ -1,6 +1,6 @@
 const { initSession } = require("../portal/portal.service")
 const { getSession } = require("../../shared/store/sessionStore")
-const { db } = require("../../config/firebase-admin-config")
+const { db, admin } = require("../../config/firebase-admin-config")
 const {
   fetchViewHistory,
 } = require("../searches/party-name/party-name.service");
