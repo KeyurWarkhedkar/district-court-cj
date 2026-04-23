@@ -1,6 +1,6 @@
 const { initSession } = require("../portal/portal.service")
 const { getSession } = require("../../shared/store/sessionStore")
-const { db } = require("../../config/firebase-admin-config")
+const { db, admin } = require("../../config/firebase-admin-config")
 const {
   fetchViewHistory,
 } = require("../searches/party-name/party-name.service");
@@ -82,9 +82,9 @@ async function caseSyncCronJob() {
                 registrationDate: newData.result.case_details.registration_date,
                 cnrNumber: newData.result.case_details.cnr_number,
                 courtName: newData.result.case_status.court_number_and_judge || newData.result.court_header.court_name,
-                firstHearingDate: newData.result.case_status.first_hearing_date,
-                nextHearingDate: newData.result.case_status.next_hearing_date,
-                decisionDate: newData.result.case_status.decision_date,
+                firstHearingDate: parseCourtDate(newData.result.case_status.first_hearing_date),
+                nextHearingDate: parseCourtDate(newData.result.case_status.next_hearing_date),
+                decisionDate: parseCourtDate(newData.result.case_status.decision_date),
                 stageOfCase: newData.result.case_status.case_stage,
                 allPetitioners, 
                 allRespondents,   
@@ -94,7 +94,7 @@ async function caseSyncCronJob() {
                 interimOrders: newData.result.interim_orders,
                 finalOrders: newData.result.final_orders,
                 connectedCases: newData.result.connected_cases,
-                status: "SYNCED",
+                status: newData.result.case_status.case_status,
                 lastSyncedAt: new Date()
             };
 
@@ -111,6 +111,40 @@ async function caseSyncCronJob() {
             console.log("Some error occurred: ", err.message);
         }
     }
+}
+
+function parseCourtDate(dateStr) {
+    if (!dateStr || typeof dateStr !== "string") return null;
+
+    // Example input: "09th March 2026"
+    const cleaned = dateStr.replace(/(\d+)(st|nd|rd|th)/, "$1"); 
+    const parts = cleaned.split(" ");
+
+    if (parts.length !== 3) return null;
+
+    let [day, month, year] = parts;
+
+    const monthMap = {
+        january: "01",
+        february: "02",
+        march: "03",
+        april: "04",
+        may: "05",
+        june: "06",
+        july: "07",
+        august: "08",
+        september: "09",
+        october: "10",
+        november: "11",
+        december: "12"
+    };
+
+    const monthNum = monthMap[month.toLowerCase()];
+    if (!monthNum) return null;
+
+    day = day.padStart(2, "0");
+
+    return `${day}/${monthNum}/${year}`;
 }
 
 function normalizePetitionerEntries(entries) {
