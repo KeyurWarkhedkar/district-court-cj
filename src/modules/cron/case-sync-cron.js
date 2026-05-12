@@ -103,9 +103,10 @@ async function caseSyncCronJob() {
 
             console.log("Case updated in Firestore: ", dcCase.id);
 
-            const newDate = newData.result.case_status.next_hearing_date;
-            if(newDate && newDate != dcCase.nextHearingDate) {
-                createNotification(dcCase.owner, dcCase.id, newDate);
+            const newDateRaw = newData.result.case_status.next_hearing_date;
+            const newDateParsed = parseCourtDate(newDateRaw);
+            if (newDateParsed && newDateParsed !== dcCase.nextHearingDate) {
+                await createNotification(dcCase.owner, dcCase.id, newDateRaw);
             }
         } catch (err) {
             console.log("Some error occurred: ", err.message);
@@ -241,9 +242,10 @@ function parseNextHearingDate(dateStr) {
 
 async function createNotification(ownerId, caseId, nextHearingDate) {
   try {
-    // Fetch FCM tokens of owner
+    // Fetch FCM tokens of owner. JuridentPortal stores users in `lawyers`
+    // and `client` (singular) — not `clients`.
     const lawyerDoc = await db.collection("lawyers").doc(ownerId).get();
-    const clientDoc = await db.collection("clients").doc(ownerId).get();
+    const clientDoc = await db.collection("client").doc(ownerId).get();
     if (!lawyerDoc.exists && !clientDoc.exists) {
       console.log("Owner not found for case:", caseId);
       return;
@@ -251,7 +253,9 @@ async function createNotification(ownerId, caseId, nextHearingDate) {
 
     const ownerDoc = lawyerDoc.exists ? lawyerDoc : clientDoc;
 
-    const fcmTokens = ownerDoc.data().fcmTokens || [];
+    // fcmTokens are stored as `{ token, platform, updatedAt }` objects by
+    // fcmService.js. Some legacy entries may be raw strings.
+    const fcmTokens = normalizeFcmTokens(ownerDoc.data().fcmTokens);
 
     // Compute reminder times
     const hearingDate = parseNextHearingDate(nextHearingDate);
@@ -285,20 +289,47 @@ async function createNotification(ownerId, caseId, nextHearingDate) {
   }
 }
 
+function normalizeFcmTokens(rawTokens) {
+  if (!Array.isArray(rawTokens)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const entry of rawTokens) {
+    const t = typeof entry === "string" ? entry : entry?.token;
+    if (!t || typeof t !== "string") continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    result.push(t);
+  }
+  return result;
+}
+
+function withPlatformConfig(message) {
+  return {
+    ...message,
+    apns: {
+      headers: { "apns-priority": "10" },
+      payload: { aps: { sound: "default", badge: 1 } },
+      ...(message.apns || {}),
+    },
+    android: {
+      priority: "high",
+      notification: {
+        channelId: "high_importance_channel",
+        sound: "notification_sound",
+      },
+      ...(message.android || {}),
+    },
+  };
+}
+
 async function sendDueNotifications() {
   try {
-    const now = new Date();
-
-    // Start of today (00:00)
+    // Start of today (00:00) and end of tomorrow (23:59) in local timezone.
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Start of tomorrow
-    const tomorrow = new Date(today);
-    tomorrow.setDate(today.getDate() + 1);
-
-    // End of tomorrow (23:59)
-    const endOfTomorrow = new Date(tomorrow);
+    const endOfTomorrow = new Date(today);
+    endOfTomorrow.setDate(today.getDate() + 1);
     endOfTomorrow.setHours(23, 59, 59, 999);
 
     console.log("Checking notifications between:", today, "and", endOfTomorrow);
@@ -316,27 +347,61 @@ async function sendDueNotifications() {
     for (const doc of snapshot.docs) {
       const data = doc.data();
 
-      const tokens = data.fcmTokens || [];
+      // Decide which reminder window we are in so we can avoid resending
+      // the same one. reminder1 = day-before 8AM, reminder2 = day-of 8AM.
+      const hearing = data.nextHearingDate?.toDate
+        ? data.nextHearingDate.toDate()
+        : new Date(data.nextHearingDate);
+      const isSameDay = hearing >= today && hearing < new Date(today.getTime() + 24*60*60*1000);
+      const reminderField = isSameDay ? "reminder2Sent" : "reminder1Sent";
+
+      if (data[reminderField]) {
+        continue;
+      }
+
+      // Re-fetch tokens at send time — they rotate and the stored snapshot
+      // can be stale by hours.
+      let ownerSnap = await db.collection("lawyers").doc(data.userId).get();
+      if (!ownerSnap.exists) {
+        ownerSnap = await db.collection("client").doc(data.userId).get();
+      }
+      const tokens = ownerSnap.exists
+        ? normalizeFcmTokens(ownerSnap.data().fcmTokens)
+        : normalizeFcmTokens(data.fcmTokens);
+
       if (!tokens.length) {
         console.log(`No FCM tokens for doc: ${doc.id}`);
         continue;
       }
 
-      const message = {
-        notification: {
-          title: data.title || "Hearing Reminder",
-          body: data.message || "You have an upcoming hearing",
-        },
-        tokens,
+      const notification = {
+        title: data.title || "Hearing Reminder",
+        body: data.message || "You have an upcoming hearing",
       };
 
-      try {
-        const response = await admin.messaging().sendMulticast(message);
+      const messages = tokens.map((token) =>
+        withPlatformConfig({ token, notification })
+      );
 
+      try {
+        const response = await admin.messaging().sendEach(messages);
         console.log(
           `Notification sent for case ${data.caseId} | success: ${response.successCount}, failure: ${response.failureCount}`
         );
-
+        if (response.failureCount > 0) {
+          response.responses.forEach((resp, idx) => {
+            if (!resp.success) {
+              console.error(
+                `FCM failure for doc ${doc.id} token ...${tokens[idx].slice(-6)}:`,
+                resp.error?.code,
+                resp.error?.message
+              );
+            }
+          });
+        }
+        if (response.successCount > 0) {
+          await doc.ref.update({ [reminderField]: true });
+        }
       } catch (err) {
         console.error("FCM send error for doc:", doc.id, err);
       }
@@ -344,7 +409,7 @@ async function sendDueNotifications() {
 
   } catch (err) {
     console.error("Error in sendDueNotifications:", err);
-    throw err; 
+    throw err;
   }
 }
 

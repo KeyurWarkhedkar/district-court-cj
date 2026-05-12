@@ -23,7 +23,7 @@ cron.schedule('0 0 * * *', async () => {
   timezone: "Asia/Kolkata"
 });
 
-cron.schedule('* 8 * * *', async () => {
+cron.schedule('0 8 * * *', async () => {
   console.log('Starting due notifications job at', new Date());
   try {
     await sendDueNotifications();
