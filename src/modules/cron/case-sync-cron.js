@@ -28,10 +28,11 @@ async function caseSyncCronJob() {
     });
 
     //Get cases from firebase
-    const dbCases = await getHighCourtCasesFromDb();
+    const dbCases = await getDistrictCourtCasesFromDb();
 
     //Iterate through the cases and update one by one
     for(const dcCase of dbCases) {
+      console.log("Processing case sync cron for case: " + dcCase.id);
         //Fetch updated data from gov api
         try {
             let CASE_NO = dcCase.payload?.detailsPayload?.caseNo;
@@ -55,8 +56,7 @@ async function caseSyncCronJob() {
             };
 
             if (!params.caseNo || !params.cino || !params.courtCode) {
-                console.log("Required fields missing");
-                continue;
+              console.log("Required fields missing - caseNo:", params.caseNo, "cino:", params.cino, "courtCode:", params.courtCode);               continue;
             }
 
             const html = await fetchViewHistory(session, params);
@@ -73,6 +73,21 @@ async function caseSyncCronJob() {
             const allPetitioners = normalizePetitionerEntries(newData.result.petitioner_and_advocate.entries);
             const allRespondents = normalizeRespondentEntries(newData.result.respondent_and_advocate.entries);
 
+            const now = new Date();
+            const existingDate = dcCase.nextHearingDate;
+            const newDateParsed = parseCourtDate(newData.result.case_status.next_hearing_date);
+
+            const shouldUpdateHearingDate =
+            !existingDate ||
+            (
+              newDateParsed &&
+              (
+                toDate(existingDate) <= now ||
+                toDate(newDateParsed) >= toDate(existingDate)
+              )
+            );
+
+
             //Update the db case with new updated data
             const updatedCase = {
                 filingNumber: newData.result.case_details.filing_number,
@@ -83,7 +98,7 @@ async function caseSyncCronJob() {
                 cnrNumber: newData.result.case_details.cnr_number,
                 courtName: newData.result.case_status.court_number_and_judge || newData.result.court_header.court_name,
                 firstHearingDate: parseCourtDate(newData.result.case_status.first_hearing_date),
-                nextHearingDate: parseCourtDate(newData.result.case_status.next_hearing_date),
+                nextHearingDate: shouldUpdateHearingDate ? newDateParsed : existingDate,
                 decisionDate: parseCourtDate(newData.result.case_status.decision_date),
                 stageOfCase: newData.result.case_status.case_stage,
                 allPetitioners, 
@@ -104,15 +119,21 @@ async function caseSyncCronJob() {
             console.log("Case updated in Firestore: ", dcCase.id);
 
             const newDateRaw = newData.result.case_status.next_hearing_date;
-            const newDateParsed = parseCourtDate(newDateRaw);
-            if (newDateParsed && newDateParsed !== dcCase.nextHearingDate) {
-                await createNotification(dcCase.owner, dcCase.id, newDateRaw);
+            if (shouldUpdateHearingDate && newDateParsed && newDateParsed !== dcCase.nextHearingDate) {
+                createNotification(dcCase.owner, dcCase.id, newDateRaw, dcCase)
+                .catch(err => console.error(`Notification creation failed for case ${dcCase.id}:`, err));
             }
         } catch (err) {
             console.log("Some error occurred: ", err.message);
         }
     }
 }
+
+const toDate = (str) => {
+    if (!str) return null;
+    const [dd, mm, yyyy] = str.split("/");
+    return new Date(`${yyyy}-${mm}-${dd}`);
+};
 
 function parseCourtDate(dateStr) {
     if (!dateStr || typeof dateStr !== "string") return null;
@@ -171,7 +192,7 @@ function normalizeRespondentEntries(entries) {
   });
 }
 
-async function getHighCourtCasesFromDb() {
+async function getDistrictCourtCasesFromDb() {
   try {
     const casesRef = db.collection("pending");
 
@@ -193,7 +214,7 @@ async function getHighCourtCasesFromDb() {
 
 /*async function getSingleCaseFromDb() {
   try {
-    const docId = "A27UYPwkPqZo88FDVdtk"; // your test doc ID
+    const docId = "lwf7OYs6PGmEZ2JqwIYZ"; // your test doc ID
     const docSnap = await db.collection("pending").doc(docId).get();
 
     if (!docSnap.exists) {
@@ -240,7 +261,7 @@ function parseNextHearingDate(dateStr) {
   return null;
 }
 
-async function createNotification(ownerId, caseId, nextHearingDate) {
+async function createNotification(ownerId, caseId, nextHearingDate, dcCase) {
   try {
     // Fetch FCM tokens of owner. JuridentPortal stores users in `lawyers`
     // and `client` (singular) — not `clients`.
@@ -259,31 +280,41 @@ async function createNotification(ownerId, caseId, nextHearingDate) {
 
     // Compute reminder times
     const hearingDate = parseNextHearingDate(nextHearingDate);
+    console.log(hearingDate);
 
-    const reminder1 = new Date(hearingDate.getTime() - 24*60*60*1000);
-    reminder1.setHours(8, 0, 0, 0);
+    // Reminder  → same day at 8:00 AM
+    const reminder1 = new Date(hearingDate);
+    reminder1.setHours(8, 0, 0, 0); // same day 8 AM
 
-    // Reminder 2 → same day at 8:00 AM
     const reminder2 = new Date(hearingDate);
-    reminder2.setHours(8, 0, 0, 0); // same day 9 AM
+    reminder2.setHours(18, 0, 0, 0);
 
     // Store notification in DB
-    const docRef = await db.collection("notificationLogs").add({
-      userId: ownerId,
-      caseId,
-      title: "Hearing Reminder",
-      message: `Your hearing is scheduled for ${nextHearingDate}`,
-      nextHearingDate: hearingDate,  // <--- store as Date
-      reminder1: new Date(hearingDate.getTime() - 24*60*60*1000),
-      reminder2: new Date(hearingDate),
-      fcmTokens,
-      reminder1Sent: false,
-      reminder2Sent: false,
-      createdAt: new Date(),
+    const event1 = await db.collection("eventReminders").add({
+      "caseId" : caseId,
+      "caseNo" : `${dcCase.caseNo}`,
+      "createdAt" : new Date(),
+      "eventTitle" : `${dcCase.petitionerName} VS ${dcCase.respondentName}`,
+      "recipientId" : ownerId,
+      "reminderTime" : reminder1,
+      "scheduledBy" : ownerId,
+      "status" : "scheduled"
     });
 
+    const event2 = await db.collection("eventReminders").add({
+      "caseId" : caseId,
+      "caseNo" : `${dcCase.caseNo}`,
+      "createdAt" : new Date(),
+      "eventTitle" : `Update Next Hearing: ${dcCase.petitionerName} VS ${dcCase.respondentName}`,
+      "recipientId" : ownerId,
+      "reminderTime" : reminder2,
+      "scheduledBy" : ownerId,
+      "status" : "scheduled"
+    });
+
+
     console.log(`Notification created for case: ${caseId}, owner: ${ownerId}`);
-    console.log(`Notification created with ID: ${docRef.id}`);
+    console.log("Notification created with ID: " + event1.id + " " + event2.id);
   } catch (err) {
     console.error("Error creating notification:", err);
   }
@@ -322,7 +353,7 @@ function withPlatformConfig(message) {
   };
 }
 
-async function sendDueNotifications() {
+/*async function sendDueNotifications() {
   try {
     // Start of today (00:00) and end of tomorrow (23:59) in local timezone.
     const today = new Date();
@@ -413,7 +444,313 @@ async function sendDueNotifications() {
   }
 }
 
+async function sendDueNotificationForDoc() {
+  try {
+    const docSnap = await db.collection("notificationLogs").doc("619z64s6i5XWzqtVavli").get();
+
+    if (!docSnap.exists) {
+      console.log("No notification found for doc:", docId);
+      return;
+    }
+
+    const data = docSnap.data();
+
+    // Decide which reminder window we are in so we can avoid resending
+    // the same one. reminder1 = day-before 8AM, reminder2 = day-of 8AM.
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const hearing = data.nextHearingDate?.toDate
+      ? data.nextHearingDate.toDate()
+      : new Date(data.nextHearingDate);
+
+    const isSameDay =
+      hearing >= today &&
+      hearing < new Date(today.getTime() + 24 * 60 * 60 * 1000);
+
+    const reminderField = isSameDay
+      ? "reminder2Sent"
+      : "reminder1Sent";
+
+    if (data[reminderField]) {
+      console.log("Reminder already sent for: 619z64s6i5XWzqtVavli");
+      return;
+    }
+
+    // Re-fetch tokens at send time — they rotate and the stored snapshot
+    // can be stale by hours.
+    let ownerSnap = await db.collection("lawyers").doc(data.userId).get();
+    if (!ownerSnap.exists) {
+      ownerSnap = await db.collection("client").doc(data.userId).get();
+    }
+
+    const tokens = ownerSnap.exists
+      ? normalizeFcmTokens(ownerSnap.data().fcmTokens)
+      : normalizeFcmTokens(data.fcmTokens);
+
+    if (!tokens.length) {
+      console.log(`No FCM tokens for doc: ${docId}`);
+      return;
+    }
+
+    const notification = {
+      title: data.title || "Hearing Reminder",
+      body: data.message || "You have an upcoming hearing",
+    };
+
+    const messages = tokens.map((token) =>
+      withPlatformConfig({ token, notification })
+    );
+
+    try {
+      const response = await admin.messaging().sendEach(messages);
+
+      console.log(
+        `Notification sent for case ${data.caseId} | success: ${response.successCount}, failure: ${response.failureCount}`
+      );
+
+      if (response.failureCount > 0) {
+        response.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            console.error(
+              `FCM failure for doc ${docId} token ...${tokens[idx].slice(-6)}:`,
+              resp.error?.code,
+              resp.error?.message
+            );
+          }
+        });
+      }
+
+      if (response.successCount > 0) {
+        await docSnap.ref.update({ [reminderField]: true });
+      }
+    } catch (err) {
+      console.error("FCM send error for doc:", docId, err);
+    }
+
+  } catch (err) {
+    console.error("Error in sendDueNotificationForDoc:", err);
+    throw err;
+  }
+}
+
+async function sendMorningNotifications() {
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    let reminders = await db.collection("eventReminders")
+                          .where("nextHearingDate", ">=", startOfDay)
+                          .where("nextHearingDate", "<=", endOfDay)
+                          .get();
+
+
+    if (reminders.empty) {
+      console.log("No notifications found for today");
+      return;
+    }
+
+    for (let reminderDoc of reminders.docs) {
+      let reminder = reminderDoc.data();
+
+      // Transaction: atomically claim the reminder
+      let claimed = false;
+      try {
+        await db.runTransaction(async (t) => {
+          const fresh = await t.get(reminderDoc.ref);
+
+          if (fresh.data().event1.reminderSent) {
+            claimed = false; // already claimed by another cron
+            return;
+          }
+
+          // Mark as sent atomically so no other cron can claim it
+          t.update(reminderDoc.ref, { "event1.reminderSent": true, sentAt: new Date() });
+          claimed = true;
+        });
+      } catch (err) {
+        console.error("Transaction failed for doc:", reminderDoc.id, err);
+        continue;
+      }
+
+      if (!claimed) {
+        console.log("Reminder for case " + reminder.caseId + " already sent.");
+        continue;
+      }
+      // End of transaction
+
+      try {
+        let ownerSnap = await db.collection("lawyers").doc(reminder.userId).get();
+        if (!ownerSnap.exists) {
+          ownerSnap = await db.collection("client").doc(reminder.userId).get();
+        }
+        const tokens = ownerSnap.exists
+          ? normalizeFcmTokens(ownerSnap.data().fcmTokens)
+          : normalizeFcmTokens(reminder.fcmTokens);
+
+        if (!tokens.length) {
+          console.log(`No FCM tokens for doc: ${reminderDoc.id}`);
+          continue;
+        }
+
+        const notification = {
+          title: reminder.event1.description || "Hearing Reminder",
+          body: reminder.event1.title || "You have an upcoming hearing",
+        };
+
+        const messages = tokens.map((token) =>
+          withPlatformConfig({ token, notification })
+        );
+
+        const response = await admin.messaging().sendEach(messages);
+        console.log(
+          `Notification sent for case ${reminder.caseId} | success: ${response.successCount}, failure: ${response.failureCount}`
+        );
+        if (response.failureCount > 0) {
+          response.responses.forEach((resp, idx) => {
+            if (!resp.success) {
+              console.error(
+                `FCM failure for doc ${reminderDoc.id} token ...${tokens[idx].slice(-6)}:`,
+                resp.error?.code,
+                resp.error?.message
+              );
+            }
+          });
+        }
+
+        // Note: we already set reminderSent: true in the transaction above
+        // so we don't update it again here
+
+        const eventNotification = {
+          "userId": reminder.userId,
+          "caseId": reminder.caseId
+        };
+        await db.collection("notificationLogs").add(eventNotification);
+      } catch (err) {
+        // FCM failed — roll back the flag so another cron can retry
+        await reminderDoc.ref.update({ reminderSent: false, sentAt: null });
+        console.error("FCM send error for doc:", reminderDoc.id, err);
+      }
+    }
+  } catch (err) {
+    console.error("Error in sendDueNotifications:", err);
+    throw err;
+  }
+}
+
+async function sendEveningNotifications() {
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    let reminders = await db.collection("eventReminders")
+                          .where("nextHearingDate", ">=", startOfDay)
+                          .where("nextHearingDate", "<=", endOfDay)
+                          .get();
+
+
+    if (reminders.empty) {
+      console.log("No notifications found for today");
+      return;
+    }
+
+    for (let reminderDoc of reminders.docs) {
+      let reminder = reminderDoc.data();
+
+      // Transaction: atomically claim the reminder
+      let claimed = false;
+      try {
+        await db.runTransaction(async (t) => {
+          const fresh = await t.get(reminderDoc.ref);
+
+          if (fresh.data().event2.reminderSent) {
+            claimed = false; // already claimed by another cron
+            return;
+          }
+
+          // Mark as sent atomically so no other cron can claim it
+          t.update(reminderDoc.ref, { "event2.reminderSent": true, sentAt: new Date() });
+          claimed = true;
+        });
+      } catch (err) {
+        console.error("Transaction failed for doc:", reminderDoc.id, err);
+        continue;
+      }
+
+      if (!claimed) {
+        console.log("Reminder for case " + reminder.caseId + " already sent.");
+        continue;
+      }
+      // End of transaction
+
+      let ownerSnap = await db.collection("lawyers").doc(reminder.userId).get();
+      if (!ownerSnap.exists) {
+        ownerSnap = await db.collection("client").doc(reminder.userId).get();
+      }
+      const tokens = ownerSnap.exists
+        ? normalizeFcmTokens(ownerSnap.data().fcmTokens)
+        : normalizeFcmTokens(reminder.fcmTokens);
+
+      if (!tokens.length) {
+        console.log(`No FCM tokens for doc: ${reminderDoc.id}`);
+        continue;
+      }
+
+      const notification = {
+        title: reminder.event2.eventReminders.eventTitle || "Hearing Reminder",
+        body: reminder.event2.title || "You have an upcoming hearing",
+      };
+
+      const messages = tokens.map((token) =>
+        withPlatformConfig({ token, notification })
+      );
+
+      try {
+        const response = await admin.messaging().sendEach(messages);
+        console.log(
+          `Notification sent for case ${reminder.caseId} | success: ${response.successCount}, failure: ${response.failureCount}`
+        );
+        if (response.failureCount > 0) {
+          response.responses.forEach((resp, idx) => {
+            if (!resp.success) {
+              console.error(
+                `FCM failure for doc ${reminderDoc.id} token ...${tokens[idx].slice(-6)}:`,
+                resp.error?.code,
+                resp.error?.message
+              );
+            }
+          });
+        }
+
+        // Note: we already set reminderSent: true in the transaction above
+        // so we don't update it again here
+
+        const eventNotification = {
+          "userId": reminder.userId,
+          "caseId": reminder.caseId
+        };
+        await db.collection("notificationLogs").add(eventNotification);
+      } catch (err) {
+        // FCM failed — roll back the flag so another cron can retry
+        await reminderDoc.ref.update({ reminderSent: false, sentAt: null });
+        console.error("FCM send error for doc:", reminderDoc.id, err);
+      }
+    }
+  } catch (err) {
+    console.error("Error in sendDueNotifications:", err);
+    throw err;
+  }
+}*/
+
+caseSyncCronJob();
+
 module.exports = {
     caseSyncCronJob,
-    sendDueNotifications,
+    //sendDueNotifications,
 }
