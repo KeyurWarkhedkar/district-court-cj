@@ -748,8 +748,6 @@ async function sendEveningNotifications() {
   }
 }*/
 
-caseSyncCronJob();
-
 module.exports = {
     caseSyncCronJob,
     //sendDueNotifications,
