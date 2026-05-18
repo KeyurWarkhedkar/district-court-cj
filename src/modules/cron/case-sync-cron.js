@@ -6,167 +6,167 @@ const {
 } = require("../searches/party-name/party-name.service");
 
 const { sanitizeCaseDetailResponse,
-    attachOrderPdfProxy,
-    buildCaseDetailSections,
+  attachOrderPdfProxy,
+  buildCaseDetailSections,
 } = require("../searches/party-name/party-name.controller")
 
 const { parseCaseDetail } = require("../searches/party-name/parsers");
 
 
 async function caseSyncCronJob() {
-    //Fetch the session
-    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const session = getSession(sessionId);
-    await initSession(session);
+  //Fetch the session
+  const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const session = getSession(sessionId);
+  await initSession(session);
 
-    const cookies = await session.jar.getCookies("https://services.ecourts.gov.in/ecourtindia_v6/");
+  const cookies = await session.jar.getCookies("https://services.ecourts.gov.in/ecourtindia_v6/");
 
-    let JSESSIONID, SERVICES_SESSID;
-    cookies.forEach(cookie => {
+  let JSESSIONID, SERVICES_SESSID;
+  cookies.forEach(cookie => {
     if (cookie.key === "JSESSION") JSESSIONID = cookie.value;
     if (cookie.key === "SERVICES_SESSID") SERVICES_SESSID = cookie.value;
-    });
+  });
 
-    //Get cases from firebase
-    const dbCases = await getDistrictCourtCasesFromDb();
+  //Get cases from firebase
+  const dbCases = await getDistrictCourtCasesFromDb();
 
-    //Iterate through the cases and update one by one
-    for(const dcCase of dbCases) {
-      console.log("Processing case sync cron for case: " + dcCase.id);
-        //Fetch updated data from gov api
-        try {
-            let CASE_NO = dcCase.payload?.detailsPayload?.caseNo;
-            let COURT_CODE = dcCase.payload?.detailsPayload?.courtCode;
-            let COURT_COMPLEX_CODE = dcCase.payload?.detailsPayload?.complexCode;
-            let STATE_CODE = dcCase.payload?.detailsPayload?.stateCode;
-            let CINO = dcCase.payload?.detailsPayload?.cino;
-            let DIST_CODE = dcCase.payload?.detailsPayload?.distCode;
-            let SEARCH_FLAG = dcCase.payload?.detailsPayload?.searchFlag;
-            let SEARCH_BY = dcCase.payload?.detailsPayload?.searchBy;
-            const params = {
-                caseNo: CASE_NO,
-                cino: CINO,
-                courtCode: COURT_CODE,
-                hideparty: "",
-                searchFlag: SEARCH_FLAG,
-                stateCode: STATE_CODE,
-                distCode: DIST_CODE,
-                complexCode: COURT_COMPLEX_CODE,
-                searchBy: SEARCH_BY
-            };
+  //Iterate through the cases and update one by one
+  for (const dcCase of dbCases) {
+    console.log("Processing case sync cron for case: " + dcCase.id);
+    //Fetch updated data from gov api
+    try {
+      let CASE_NO = dcCase.payload?.detailsPayload?.caseNo;
+      let COURT_CODE = dcCase.payload?.detailsPayload?.courtCode;
+      let COURT_COMPLEX_CODE = dcCase.payload?.detailsPayload?.complexCode;
+      let STATE_CODE = dcCase.payload?.detailsPayload?.stateCode;
+      let CINO = dcCase.payload?.detailsPayload?.cino;
+      let DIST_CODE = dcCase.payload?.detailsPayload?.distCode;
+      let SEARCH_FLAG = dcCase.payload?.detailsPayload?.searchFlag;
+      let SEARCH_BY = dcCase.payload?.detailsPayload?.searchBy;
+      const params = {
+        caseNo: CASE_NO,
+        cino: CINO,
+        courtCode: COURT_CODE,
+        hideparty: "",
+        searchFlag: SEARCH_FLAG,
+        stateCode: STATE_CODE,
+        distCode: DIST_CODE,
+        complexCode: COURT_COMPLEX_CODE,
+        searchBy: SEARCH_BY
+      };
 
-            if (!params.caseNo || !params.cino || !params.courtCode) {
-              console.log("Required fields missing - caseNo:", params.caseNo, "cino:", params.cino, "courtCode:", params.courtCode);               continue;
-            }
+      if (!params.caseNo || !params.cino || !params.courtCode) {
+        console.log("Required fields missing - caseNo:", params.caseNo, "cino:", params.cino, "courtCode:", params.courtCode); continue;
+      }
 
-            const html = await fetchViewHistory(session, params);
-            const caseDetailResult = sanitizeCaseDetailResponse(
-                attachOrderPdfProxy(parseCaseDetail(html), sessionId),
-            );
+      const html = await fetchViewHistory(session, params);
+      const caseDetailResult = sanitizeCaseDetailResponse(
+        attachOrderPdfProxy(parseCaseDetail(html), sessionId),
+      );
 
-            const newData = {
-                message: "Case details fetched",
-                result: buildCaseDetailSections(caseDetailResult),
-                rawHtml: html,
-            };
+      const newData = {
+        message: "Case details fetched",
+        result: buildCaseDetailSections(caseDetailResult),
+        rawHtml: html,
+      };
 
-            const allPetitioners = normalizePetitionerEntries(newData.result.petitioner_and_advocate.entries);
-            const allRespondents = normalizeRespondentEntries(newData.result.respondent_and_advocate.entries);
+      const allPetitioners = normalizePetitionerEntries(newData.result.petitioner_and_advocate.entries);
+      const allRespondents = normalizeRespondentEntries(newData.result.respondent_and_advocate.entries);
 
-            const now = new Date();
-            const existingDate = dcCase.nextHearingDate;
-            const newDateParsed = parseCourtDate(newData.result.case_status.next_hearing_date);
+      const now = new Date();
+      const existingDate = dcCase.nextHearingDate;
+      const newDateParsed = parseCourtDate(newData.result.case_status.next_hearing_date);
 
-            const shouldUpdateHearingDate =
-            !existingDate ||
-            (
-              newDateParsed &&
-              (
-                toDate(existingDate) <= now ||
-                toDate(newDateParsed) >= toDate(existingDate)
-              )
-            );
+      const shouldUpdateHearingDate =
+        !existingDate ||
+        (
+          newDateParsed &&
+          (
+            toDate(existingDate) <= now ||
+            toDate(newDateParsed) >= toDate(existingDate)
+          )
+        );
 
 
-            //Update the db case with new updated data
-            const updatedCase = {
-                filingNumber: newData.result.case_details.filing_number,
-                caseType: newData.result.case_details.case_type,
-                caseFiledDate: newData.result.case_details.filing_date,
-                registrationNumber: newData.result.case_details.registration_number,
-                registrationDate: newData.result.case_details.registration_date,
-                cnrNumber: newData.result.case_details.cnr_number,
-                courtName: newData.result.case_status.court_number_and_judge || newData.result.court_header.court_name,
-                firstHearingDate: parseCourtDate(newData.result.case_status.first_hearing_date),
-                nextHearingDate: shouldUpdateHearingDate ? newDateParsed : existingDate,
-                decisionDate: parseCourtDate(newData.result.case_status.decision_date),
-                stageOfCase: newData.result.case_status.case_stage,
-                allPetitioners, 
-                allRespondents,   
-                allActs: newData.result.acts,
-                iaStatus: newData.result.ia_status,
-                caseHistory: newData.result.case_history,
-                interimOrders: newData.result.interim_orders,
-                finalOrders: newData.result.final_orders,
-                connectedCases: newData.result.connected_cases,
-                status: newData.result.case_status.case_status,
-                lastSyncedAt: new Date()
-            };
+      //Update the db case with new updated data
+      const updatedCase = {
+        filingNumber: newData.result.case_details.filing_number,
+        caseType: newData.result.case_details.case_type,
+        caseFiledDate: newData.result.case_details.filing_date,
+        registrationNumber: newData.result.case_details.registration_number,
+        registrationDate: newData.result.case_details.registration_date,
+        cnrNumber: newData.result.case_details.cnr_number,
+        courtName: newData.result.case_status.court_number_and_judge || newData.result.court_header.court_name,
+        firstHearingDate: parseCourtDate(newData.result.case_status.first_hearing_date),
+        nextHearingDate: shouldUpdateHearingDate ? newDateParsed : existingDate,
+        decisionDate: parseCourtDate(newData.result.case_status.decision_date),
+        stageOfCase: newData.result.case_status.case_stage,
+        allPetitioners,
+        allRespondents,
+        allActs: newData.result.acts,
+        iaStatus: newData.result.ia_status,
+        caseHistory: newData.result.case_history,
+        interimOrders: newData.result.interim_orders,
+        finalOrders: newData.result.final_orders,
+        connectedCases: newData.result.connected_cases,
+        status: newData.result.case_status.case_status,
+        lastSyncedAt: new Date()
+      };
 
-            //Merge update into Firestore
-            await db.collection("pending").doc(dcCase.id).set(updatedCase, { merge: true });
+      //Merge update into Firestore
+      await db.collection("pending").doc(dcCase.id).set(updatedCase, { merge: true });
 
-            console.log("Case updated in Firestore: ", dcCase.id);
+      console.log("Case updated in Firestore: ", dcCase.id);
 
-            const newDateRaw = newData.result.case_status.next_hearing_date;
-            if (shouldUpdateHearingDate && newDateParsed && newDateParsed !== dcCase.nextHearingDate) {
-                createNotification(dcCase.owner, dcCase.id, newDateRaw, dcCase)
-                .catch(err => console.error(`Notification creation failed for case ${dcCase.id}:`, err));
-            }
-        } catch (err) {
-            console.log("Some error occurred: ", err.message);
-        }
+      const newDateRaw = newData.result.case_status.next_hearing_date;
+      if (shouldUpdateHearingDate && newDateParsed && newDateParsed !== dcCase.nextHearingDate) {
+        createNotification(dcCase.owner, dcCase.id, newDateRaw, dcCase)
+          .catch(err => console.error(`Notification creation failed for case ${dcCase.id}:`, err));
+      }
+    } catch (err) {
+      console.log("Some error occurred: ", err.message);
     }
+  }
 }
 
 const toDate = (str) => {
-    if (!str) return null;
-    const [dd, mm, yyyy] = str.split("/");
-    return new Date(`${yyyy}-${mm}-${dd}`);
+  if (!str) return null;
+  const [dd, mm, yyyy] = str.split("/");
+  return new Date(`${yyyy}-${mm}-${dd}`);
 };
 
 function parseCourtDate(dateStr) {
-    if (!dateStr || typeof dateStr !== "string") return null;
+  if (!dateStr || typeof dateStr !== "string") return null;
 
-    // Example input: "09th March 2026"
-    const cleaned = dateStr.replace(/(\d+)(st|nd|rd|th)/, "$1"); 
-    const parts = cleaned.split(" ");
+  // Example input: "09th March 2026"
+  const cleaned = dateStr.replace(/(\d+)(st|nd|rd|th)/, "$1");
+  const parts = cleaned.split(" ");
 
-    if (parts.length !== 3) return null;
+  if (parts.length !== 3) return null;
 
-    let [day, month, year] = parts;
+  let [day, month, year] = parts;
 
-    const monthMap = {
-        january: "01",
-        february: "02",
-        march: "03",
-        april: "04",
-        may: "05",
-        june: "06",
-        july: "07",
-        august: "08",
-        september: "09",
-        october: "10",
-        november: "11",
-        december: "12"
-    };
+  const monthMap = {
+    january: "01",
+    february: "02",
+    march: "03",
+    april: "04",
+    may: "05",
+    june: "06",
+    july: "07",
+    august: "08",
+    september: "09",
+    october: "10",
+    november: "11",
+    december: "12"
+  };
 
-    const monthNum = monthMap[month.toLowerCase()];
-    if (!monthNum) return null;
+  const monthNum = monthMap[month.toLowerCase()];
+  if (!monthNum) return null;
 
-    day = day.padStart(2, "0");
+  day = day.padStart(2, "0");
 
-    return `${day}/${monthNum}/${year}`;
+  return `${day}/${monthNum}/${year}`;
 }
 
 function normalizePetitionerEntries(entries) {
@@ -199,6 +199,7 @@ async function getDistrictCourtCasesFromDb() {
     // Admin SDK query
     const querySnapshot = await casesRef
       .where("payload.caseexportedfrom", "==", "DistrictCourt")
+      .where("owner", "==", "hhXchcgjrtP3brr1AxQMJiVbbMV2")
       .get();
 
     const cases = [];
@@ -291,25 +292,25 @@ async function createNotification(ownerId, caseId, nextHearingDate, dcCase) {
 
     // Store notification in DB
     const event1 = await db.collection("eventReminders").add({
-      "caseId" : caseId,
-      "caseNo" : `${dcCase.caseNo}`,
-      "createdAt" : new Date(),
-      "eventTitle" : `${dcCase.petitionerName} VS ${dcCase.respondentName}`,
-      "recipientId" : ownerId,
-      "reminderTime" : reminder1,
-      "scheduledBy" : ownerId,
-      "status" : "scheduled"
+      "caseId": caseId,
+      "caseNo": `${dcCase.caseNo}`,
+      "createdAt": new Date(),
+      "eventTitle": `${dcCase.petitionerName} VS ${dcCase.respondentName}`,
+      "recipientId": ownerId,
+      "reminderTime": reminder1,
+      "scheduledBy": ownerId,
+      "status": "scheduled"
     });
 
     const event2 = await db.collection("eventReminders").add({
-      "caseId" : caseId,
-      "caseNo" : `${dcCase.caseNo}`,
-      "createdAt" : new Date(),
-      "eventTitle" : `Update Next Hearing: ${dcCase.petitionerName} VS ${dcCase.respondentName}`,
-      "recipientId" : ownerId,
-      "reminderTime" : reminder2,
-      "scheduledBy" : ownerId,
-      "status" : "scheduled"
+      "caseId": caseId,
+      "caseNo": `${dcCase.caseNo}`,
+      "createdAt": new Date(),
+      "eventTitle": `Update Next Hearing: ${dcCase.petitionerName} VS ${dcCase.respondentName}`,
+      "recipientId": ownerId,
+      "reminderTime": reminder2,
+      "scheduledBy": ownerId,
+      "status": "scheduled"
     });
 
 
@@ -749,6 +750,6 @@ async function sendEveningNotifications() {
 }*/
 
 module.exports = {
-    caseSyncCronJob,
-    //sendDueNotifications,
+  caseSyncCronJob,
+  //sendDueNotifications,
 }

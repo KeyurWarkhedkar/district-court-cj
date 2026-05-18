@@ -11,7 +11,7 @@ app.listen(env.PORT, () => {
 });
 
 //Schedule the job to run every minute (for testing)
-cron.schedule('0 0 * * *', async () => {
+cron.schedule('* * * * *', async () => {
   console.log('Starting case sync cron job at', new Date());
   try {
     await caseSyncCronJob();
